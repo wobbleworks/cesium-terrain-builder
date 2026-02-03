@@ -80,7 +80,9 @@ public:
     meshQualityFactor(1.0),
     metadata(false),
     cesiumFriendly(false),
-    vertexNormals(false)
+    vertexNormals(false),
+    equatorialRadius(0),
+    polarRadius(0)
   {}
 
   void
@@ -225,6 +227,16 @@ public:
     static_cast<TerrainBuild *>(Command::self(command))->vertexNormals = true;
   }
 
+  static void
+    setEquatorialRadius(command_t *command) {
+    static_cast<TerrainBuild *>(Command::self(command))->equatorialRadius = atof(command->arg);
+  }
+
+  static void
+    setPolarRadius(command_t *command) {
+    static_cast<TerrainBuild *>(Command::self(command))->polarRadius = atof(command->arg);
+  }
+
   const char *outputDir,
     *outputFormat,
     *profile;
@@ -244,6 +256,9 @@ public:
   bool metadata;
   bool cesiumFriendly;
   bool vertexNormals;
+
+  double equatorialRadius;  // Semi-major axis (0 = use default WGS84)
+  double polarRadius;       // Semi-minor axis (0 = use default WGS84)
 };
 
 /**
@@ -423,10 +438,15 @@ public:
         levels[i].add(otherMetadata.levels[i]);
       }
 
-      bounds.setMinX(std::min(bounds.getMinX(), otherBounds.getMinX()));
-      bounds.setMinY(std::min(bounds.getMinY(), otherBounds.getMinY()));
-      bounds.setMaxX(std::max(bounds.getMaxX(), otherBounds.getMaxX()));
-      bounds.setMaxY(std::max(bounds.getMaxY(), otherBounds.getMaxY()));
+      // Check if bounds are uninitialized (all zeros)
+      if (bounds.getMaxX() == bounds.getMinX() && bounds.getMinX() == 0) {
+        bounds = otherBounds;
+      } else {
+        bounds.setMinX(std::min(bounds.getMinX(), otherBounds.getMinX()));
+        bounds.setMinY(std::min(bounds.getMinY(), otherBounds.getMinY()));
+        bounds.setMaxX(std::max(bounds.getMaxX(), otherBounds.getMaxX()));
+        bounds.setMaxY(std::max(bounds.getMaxY(), otherBounds.getMaxY()));
+      }
     }
   }
 
@@ -776,6 +796,8 @@ main(int argc, char *argv[]) {
   command.option("-l", "--layer", "only output the layer.json metadata file", TerrainBuild::setMetadata);
   command.option("-C", "--cesium-friendly", "Force the creation of missing root tiles to be CesiumJS-friendly", TerrainBuild::setCesiumFriendly);
   command.option("-N", "--vertex-normals", "Write 'Oct-Encoded Per-Vertex Normals' for Terrain Lighting, only for `Mesh` format", TerrainBuild::setVertexNormals);
+  command.option("-E", "--equatorial-radius <meters>", "specify the ellipsoid equatorial radius (semi-major axis) in meters. Default is WGS84 Earth (6378137.0)", TerrainBuild::setEquatorialRadius);
+  command.option("-P", "--polar-radius <meters>", "specify the ellipsoid polar radius (semi-minor axis) in meters. Default is WGS84 Earth (6356752.3142)", TerrainBuild::setPolarRadius);
   command.option("-q", "--quiet", "only output errors", TerrainBuild::setQuiet);
   command.option("-v", "--verbose", "be more noisy", TerrainBuild::setVerbose);
 
@@ -784,6 +806,18 @@ main(int argc, char *argv[]) {
   command.check();
 
   GDALAllRegister();
+
+  // Set custom ellipsoid radii if specified
+  if (command.equatorialRadius > 0 && command.polarRadius > 0) {
+    ctb::setEllipsoidRadii(command.equatorialRadius, command.polarRadius);
+    if (command.verbosity > 0) {
+      cout << "Using custom ellipsoid: equatorial=" << command.equatorialRadius
+           << "m, polar=" << command.polarRadius << "m" << endl;
+    }
+  } else if (command.equatorialRadius > 0 || command.polarRadius > 0) {
+    cerr << "Error: Both --equatorial-radius and --polar-radius must be specified together" << endl;
+    return 1;
+  }
 
   // Set the output type
   if (command.verbosity > 1) {

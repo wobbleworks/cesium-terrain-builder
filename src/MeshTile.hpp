@@ -31,6 +31,18 @@
 
 namespace ctb {
   class MeshTile;
+
+  /// Set the ellipsoid radii for ECEF coordinate conversion.
+  /// Call this before creating any MeshTile objects.
+  /// @param equatorialRadius Semi-major axis (equatorial radius) in meters
+  /// @param polarRadius Semi-minor axis (polar radius) in meters
+  void setEllipsoidRadii(double equatorialRadius, double polarRadius);
+
+  /// Get the current equatorial radius (semi-major axis)
+  double getEquatorialRadius();
+
+  /// Get the current polar radius (semi-minor axis)
+  double getPolarRadius();
 }
 
 /**

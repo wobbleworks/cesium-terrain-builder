@@ -35,23 +35,51 @@ using namespace ctb;
 ////////////////////////////////////////////////////////////////////////////////
 // Utility functions
 
+// Ellipsoid radii for ECEF coordinate conversion
+// Default values are WGS84 (Earth)
 // Constants taken from http://cesiumjs.org/2013/04/25/Horizon-culling
-double llh_ecef_radiusX = 6378137.0;
-double llh_ecef_radiusY = 6378137.0;
-double llh_ecef_radiusZ = 6356752.3142451793;
+static double llh_ecef_radiusX = 6378137.0;
+static double llh_ecef_radiusY = 6378137.0;
+static double llh_ecef_radiusZ = 6356752.3142451793;
 
-double llh_ecef_rX = 1.0 / llh_ecef_radiusX;
-double llh_ecef_rY = 1.0 / llh_ecef_radiusY;
-double llh_ecef_rZ = 1.0 / llh_ecef_radiusZ;
+static double llh_ecef_rX = 1.0 / llh_ecef_radiusX;
+static double llh_ecef_rY = 1.0 / llh_ecef_radiusY;
+static double llh_ecef_rZ = 1.0 / llh_ecef_radiusZ;
 
-// Stolen from https://github.com/bistromath/gr-air-modes/blob/master/python/mlat.py
-// WGS84 reference ellipsoid constants
+// Reference ellipsoid constants
 // http://en.wikipedia.org/wiki/Geodetic_datum#Conversion_calculations
 // http://en.wikipedia.org/wiki/File%3aECEF.png
 //
-double llh_ecef_wgs84_a = llh_ecef_radiusX;       // Semi - major axis
-double llh_ecef_wgs84_b = llh_ecef_radiusZ;       // Semi - minor axis
-double llh_ecef_wgs84_e2 = 0.0066943799901975848; // First eccentricity squared
+static double llh_ecef_wgs84_a = llh_ecef_radiusX;       // Semi - major axis
+static double llh_ecef_wgs84_b = llh_ecef_radiusZ;       // Semi - minor axis
+static double llh_ecef_wgs84_e2 = 0.0066943799901975848; // First eccentricity squared
+
+// Compute first eccentricity squared from semi-major and semi-minor axes
+static double computeEccentricitySquared(double a, double b) {
+  return (a * a - b * b) / (a * a);
+}
+
+void ctb::setEllipsoidRadii(double equatorialRadius, double polarRadius) {
+  llh_ecef_radiusX = equatorialRadius;
+  llh_ecef_radiusY = equatorialRadius;
+  llh_ecef_radiusZ = polarRadius;
+
+  llh_ecef_rX = 1.0 / llh_ecef_radiusX;
+  llh_ecef_rY = 1.0 / llh_ecef_radiusY;
+  llh_ecef_rZ = 1.0 / llh_ecef_radiusZ;
+
+  llh_ecef_wgs84_a = equatorialRadius;
+  llh_ecef_wgs84_b = polarRadius;
+  llh_ecef_wgs84_e2 = computeEccentricitySquared(equatorialRadius, polarRadius);
+}
+
+double ctb::getEquatorialRadius() {
+  return llh_ecef_radiusX;
+}
+
+double ctb::getPolarRadius() {
+  return llh_ecef_radiusZ;
+}
 
 // LLH2ECEF
 static inline double llh_ecef_n(double x) {

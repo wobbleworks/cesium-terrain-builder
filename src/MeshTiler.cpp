@@ -120,8 +120,8 @@ ctb::MeshTiler::prepareSettingsOfTile(MeshTile *terrainTile, GDALDataset *datase
   int numberOfTilesAtLevelZero = (int)(mGrid.getExtent().getWidth() / (tileSizeX * resolutionAtLevelZero));
   // Default quality of terrain created from heightmaps (TerrainProvider.js).
   double heightmapTerrainQuality = 0.25;
-  // Earth semi-major-axis in meters.
-  const double semiMajorAxis = 6378137.0;
+  // Ellipsoid semi-major-axis in meters (configurable via setEllipsoidRadii).
+  const double semiMajorAxis = ctb::getEquatorialRadius();
   // Appropriate geometric error estimate when the geometry comes from a heightmap (TerrainProvider.js).
   double maximumGeometricError = MeshTiler::getEstimatedLevelZeroGeometricErrorForAHeightmap(
     semiMajorAxis,

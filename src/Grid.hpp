@@ -190,10 +190,16 @@ public:
   /// Get the extent covered by the grid in tile coordinates for a zoom level
   inline TileBounds
   getTileExtent(i_zoom zoom) const {
-    TileCoordinate ll = crsToTile(mExtent.getLowerLeft(), zoom),
-      ur = crsToTile(mExtent.getUpperRight(), zoom);
+    // Calculate the number of tiles at this zoom level based on resolution
+    // At zoom 0, the number of tiles equals the number of root tiles (e.g., 2 for TMS geodetic)
+    // Each subsequent zoom level doubles the number of tiles
+    double tilesPerSide = mExtent.getWidth() / (resolution(zoom) * mTileSize);
+    i_tile maxTileX = static_cast<i_tile>(std::ceil(tilesPerSide)) - 1;
 
-    return TileBounds(ll, ur);
+    double tilesY = mExtent.getHeight() / (resolution(zoom) * mTileSize);
+    i_tile maxTileY = static_cast<i_tile>(std::ceil(tilesY)) - 1;
+
+    return TileBounds(TileCoordinate(zoom, 0, 0), TileCoordinate(zoom, maxTileX, maxTileY));
   }
 
 protected:

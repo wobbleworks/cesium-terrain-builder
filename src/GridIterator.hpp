@@ -184,6 +184,11 @@ public:
       TileCoordinate ll = grid.crsToTile(gridExtent.getLowerLeft(), zoom),
         ur = grid.crsToTile(gridExtent.getUpperRight(), zoom);
 
+      // Clamp upper-right to valid tile range (same fix as setTileBounds)
+      TileBounds gridTileBounds = grid.getTileExtent(zoom);
+      if (ur.x > gridTileBounds.getMaxX()) ur.x = gridTileBounds.getMaxX();
+      if (ur.y > gridTileBounds.getMaxY()) ur.y = gridTileBounds.getMaxY();
+
       TileBounds zoomBound(ll, ur);
       size += (zoomBound.getWidth() + 1) * (zoomBound.getHeight() + 1);
     }
@@ -204,6 +209,13 @@ protected:
   setTileBounds() {
     TileCoordinate ll = grid.crsToTile(gridExtent.getLowerLeft(), currentTile.zoom),
       ur = grid.crsToTile(gridExtent.getUpperRight(), currentTile.zoom);
+
+    // Clamp upper-right to the grid's valid tile range to handle boundary coordinates.
+    // When a coordinate falls exactly on a tile boundary (e.g., 180 degrees), crsToTile
+    // returns the next tile which may be outside the valid range.
+    TileBounds gridTileBounds = grid.getTileExtent(currentTile.zoom);
+    if (ur.x > gridTileBounds.getMaxX()) ur.x = gridTileBounds.getMaxX();
+    if (ur.y > gridTileBounds.getMaxY()) ur.y = gridTileBounds.getMaxY();
 
     // set the bounds
     bounds = TileBounds(ll, ur);

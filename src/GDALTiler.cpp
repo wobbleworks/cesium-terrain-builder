@@ -214,7 +214,10 @@ GDALTiler::createRasterTile(GDALDataset *dataset, const TileCoordinate &coord) c
  * This code is adapted from that found in `gdalwarp.cpp` implementing the
  * `gdalwarp -ovr` option.
  */
-#if   ( GDAL_VERSION_MAJOR >= 3 && GDAL_VERSION_MINOR >= 11)
+#if   ( GDAL_VERSION_MAJOR >= 3 && GDAL_VERSION_MINOR >= 12)
+// GDAL 3.12+ changed GetGeoTransform API - skip overview optimization
+#define CTB_SKIP_OVERVIEW_DATASET
+#elif ( GDAL_VERSION_MAJOR >= 3 && GDAL_VERSION_MINOR == 11)
 #include "overviews/gdaloverviewdataset-gdal3.11.x.cpp"
 #elif ( GDAL_VERSION_MAJOR >= 3 && GDAL_VERSION_MINOR == 10)
 #include "overviews/gdaloverviewdataset-gdal3.10.x.cpp"
@@ -231,6 +234,11 @@ GDALTiler::createRasterTile(GDALDataset *dataset, const TileCoordinate &coord) c
 static
 GDALDatasetH
 getOverviewDataset(GDALDatasetH hSrcDS, GDALTransformerFunc pfnTransformer, void *hTransformerArg) {
+#ifdef CTB_SKIP_OVERVIEW_DATASET
+  // GDAL 3.12+ has incompatible API - skip overview optimization
+  (void)hSrcDS; (void)pfnTransformer; (void)hTransformerArg;
+  return NULL;
+#else
   GDALDataset* poSrcDS = static_cast<GDALDataset*>(hSrcDS);
   GDALDataset* poSrcOvrDS = NULL;
   int nOvLevel = -2;
@@ -276,6 +284,7 @@ getOverviewDataset(GDALDatasetH hSrcDS, GDALTransformerFunc pfnTransformer, void
     }
 
   return static_cast<GDALDatasetH>(poSrcOvrDS);
+#endif // CTB_SKIP_OVERVIEW_DATASET
 }
 
 /**
