@@ -165,6 +165,11 @@ protected:
   virtual GDALTile *
   createRasterTile(GDALDataset *dataset, double (&adfGeoTransform)[6]) const;
 
+  /// Create a raster tile from a geo transform with custom output dimensions
+  virtual GDALTile *
+  createRasterTile(GDALDataset *dataset, double (&adfGeoTransform)[6],
+                   int outputWidth, int outputHeight) const;
+
   /// The grid used for generating tiles
   Grid mGrid;
 

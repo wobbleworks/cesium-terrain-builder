@@ -44,6 +44,8 @@
 #include "cpl_multiproc.h"      // for CPLGetNumCPUs
 #include "cpl_vsi.h"            // for virtual filesystem
 #include "gdal_priv.h"
+#include "gdal_utils.h"         // for GDALTranslate
+#include "ogr_spatialref.h"     // for OGRSpatialReference
 #include "commander.hpp"        // for cli parsing
 #include "concat.hpp"
 
@@ -299,6 +301,21 @@ setIteratorSize(T &iter) {
   }
 }
 
+/// Custom error handler that suppresses harmless PROJ "Invalid latitude" errors.
+/// These occur at polar boundary tiles where the vertex-centered geotransform
+/// or ghost-border extension extends slightly beyond ±90° latitude.  GDAL handles
+/// this correctly by returning NoData for the out-of-range pixels.
+static CPLErrorHandler sPrevErrorHandler = NULL;
+static void CPL_STDCALL
+CTBErrorHandler(CPLErr eErrClass, CPLErrorNum nError, const char *pszErrorMsg) {
+  if (pszErrorMsg && strstr(pszErrorMsg, "eqc: Invalid latitude")) {
+    return; // suppress
+  }
+  if (sPrevErrorHandler) {
+    sPrevErrorHandler(eErrClass, nError, pszErrorMsg);
+  }
+}
+
 /// A thread safe wrapper around `GDALTermProgress`
 static int
 CPL_STDCALL termProgress(double dfComplete, const char *pszMessage, void *pProgressArg) {
@@ -540,20 +557,17 @@ createEmptyRootElevationFile(std::string &fileName, const Grid &grid, const Tile
   const double resolution = tileBounds.getWidth() / tileSize;
   double adfGeoTransform[6] = { tileBounds.getMinX(), resolution, 0, tileBounds.getMaxY(), 0, -resolution };
 
-  // Create the spatial reference system for the file
-  OGRSpatialReference oSRS;
+  // Use the grid's SRS for the temporary file (supports non-Earth bodies)
+  OGRSpatialReference oSRS = grid.getSRS();
 
   #if ( GDAL_VERSION_MAJOR >= 3 )
   oSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
   #endif
 
-  if (oSRS.importFromEPSG(4326) != OGRERR_NONE) {
-    throw CTBException("Could not create EPSG:4326 spatial reference");
-  }
   char *pszDstWKT = NULL;
   if (oSRS.exportToWkt(&pszDstWKT) != OGRERR_NONE) {
     CPLFree(pszDstWKT);
-    throw CTBException("Could not create EPSG:4326 WKT string");
+    throw CTBException("Could not create grid SRS WKT string");
   }
 
   // Create the GTiff file
@@ -750,7 +764,7 @@ runTiler(const char *inputFilename, TerrainBuild *command, Grid *grid, TerrainMe
       const TerrainTiler tiler(poDataset, *grid);
       buildTerrain(serializer, tiler, command, threadMetadata);
     } else if (strcmp(command->outputFormat, "Mesh") == 0) {
-      const MeshTiler tiler(poDataset, *grid, command->tilerOptions, command->meshQualityFactor);
+      const MeshTiler tiler(poDataset, *grid, command->tilerOptions, command->meshQualityFactor, command->vertexNormals);
       buildMesh(serializer, tiler, command, threadMetadata, command->vertexNormals);
     } else {                    // it's a GDAL format
       const RasterTiler tiler(poDataset, *grid, command->tilerOptions);
@@ -806,6 +820,7 @@ main(int argc, char *argv[]) {
   command.check();
 
   GDALAllRegister();
+  sPrevErrorHandler = CPLSetErrorHandler(CTBErrorHandler);
 
   // Set custom ellipsoid radii if specified
   if (command.equatorialRadius > 0 && command.polarRadius > 0) {
@@ -836,11 +851,103 @@ main(int argc, char *argv[]) {
     return 1;
   }
 
+  // Inspect the source dataset SRS.  Extract the geographic CRS for the grid,
+  // and if the source is a standard Equidistant Cylindrical (Plate Carrée)
+  // projection, create an in-memory VRT that relabels it as longlat.  This
+  // avoids per-tile reprojection overhead since the pixel grid is identical.
+  OGRSpatialReference datasetGeogSRS;
+  std::string effectiveInput(command.getInputFilename());
+  std::string vrtPath;  // non-empty if we created a /vsimem/ VRT to clean up
+  {
+    GDALDataset *poInspectDS = (GDALDataset *) GDALOpen(command.getInputFilename(), GA_ReadOnly);
+    if (poInspectDS == NULL) {
+      cerr << "Error: could not open GDAL dataset" << endl;
+      return 1;
+    }
+    const char *srcWKT = poInspectDS->GetProjectionRef();
+    if (srcWKT && strlen(srcWKT) > 0) {
+      OGRSpatialReference srcSRS(srcWKT);
+      #if ( GDAL_VERSION_MAJOR >= 3 )
+      srcSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+      #endif
+      datasetGeogSRS.CopyGeogCSFrom(&srcSRS);
+
+      // Detect standard Equidistant Cylindrical (lat1=0, lon0=0) and relabel
+      // as longlat to avoid unnecessary reprojection.
+      if (srcSRS.IsProjected()) {
+        const char *projName = srcSRS.GetAttrValue("PROJECTION");
+        if (projName && strcmp(projName, SRS_PT_EQUIRECTANGULAR) == 0) {
+          double lat1 = srcSRS.GetProjParm(SRS_PP_STANDARD_PARALLEL_1, 0.0);
+          double lon0 = srcSRS.GetProjParm(SRS_PP_CENTRAL_MERIDIAN, 0.0);
+
+          if (lat1 == 0.0 && lon0 == 0.0) {
+            // eqc with lat1=0: x = R*lon_rad, y = R*lat_rad
+            // Convert geotransform from meters to degrees.
+            double semiMajor = srcSRS.GetSemiMajor();
+            double metersPerDeg = semiMajor * M_PI / 180.0;
+
+            double gt[6];
+            poInspectDS->GetGeoTransform(gt);
+
+            // Compute longlat bounds from the meter geotransform
+            double ulx = gt[0] / metersPerDeg;
+            double uly = gt[3] / metersPerDeg;
+            double lrx = (gt[0] + gt[1] * poInspectDS->GetRasterXSize()) / metersPerDeg;
+            double lry = (gt[3] + gt[5] * poInspectDS->GetRasterYSize()) / metersPerDeg;
+
+            // Get geographic CRS WKT for the VRT
+            OGRSpatialReference geogSRS;
+            geogSRS.CopyGeogCSFrom(&srcSRS);
+            #if ( GDAL_VERSION_MAJOR >= 3 )
+            geogSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+            #endif
+            char *geogWKT = NULL;
+            geogSRS.exportToWkt(&geogWKT);
+
+            // Build GDALTranslate options: output VRT with longlat SRS and bounds
+            char buf_ulx[64], buf_uly[64], buf_lrx[64], buf_lry[64];
+            snprintf(buf_ulx, 64, "%.15g", ulx);
+            snprintf(buf_uly, 64, "%.15g", uly);
+            snprintf(buf_lrx, 64, "%.15g", lrx);
+            snprintf(buf_lry, 64, "%.15g", lry);
+
+            const char *args[] = {
+              "-of", "VRT", "-a_srs", geogWKT,
+              "-a_ullr", buf_ulx, buf_uly, buf_lrx, buf_lry, NULL
+            };
+            GDALTranslateOptions *opts = GDALTranslateOptionsNew((char **)args, NULL);
+
+            vrtPath = "/vsimem/ctb_lonlat_input.vrt";
+            GDALDatasetH hVRT = GDALTranslate(
+              vrtPath.c_str(), (GDALDatasetH)poInspectDS, opts, NULL
+            );
+            GDALTranslateOptionsFree(opts);
+            CPLFree(geogWKT);
+
+            if (hVRT) {
+              GDALClose(hVRT);
+              effectiveInput = vrtPath;
+              if (command.verbosity > 0) {
+                cout << "Source is Plate Carree; treating as longlat (no reprojection)" << endl;
+              }
+            }
+          }
+        }
+      }
+    } else {
+      datasetGeogSRS.importFromEPSG(4326);
+    }
+    #if ( GDAL_VERSION_MAJOR >= 3 )
+    datasetGeogSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+    #endif
+    GDALClose(poInspectDS);
+  }
+
   // Define the grid we are going to use
   Grid grid;
   if (strcmp(command.profile, "geodetic") == 0) {
     int tileSize = (command.tileSize < 1) ? 65 : command.tileSize;
-    grid = GlobalGeodetic(tileSize);
+    grid = GlobalGeodetic(datasetGeogSRS, tileSize);
   } else if (strcmp(command.profile, "mercator") == 0) {
     int tileSize = (command.tileSize < 1) ? 256 : command.tileSize;
     grid = GlobalMercator(tileSize);
@@ -862,7 +969,7 @@ main(int argc, char *argv[]) {
   for (int i = 0; i < threadCount ; ++i) {
     packaged_task<int(const char *, TerrainBuild *, Grid *, TerrainMetadata *)> task(runTiler); // wrap the function
     tasks.push_back(task.get_future()); // get a future
-    thread(move(task), command.getInputFilename(), &command, &grid, metadata).detach(); // launch on a thread
+    thread(move(task), effectiveInput.c_str(), &command, &grid, metadata).detach(); // launch on a thread
   }
 
   // Synchronise the completion of the threads
@@ -935,6 +1042,11 @@ main(int argc, char *argv[]) {
 
     metadata->writeJsonFile(filename, datasetName, std::string(command.outputFormat), std::string(command.profile), command.vertexNormals);
     delete metadata;
+  }
+
+  // Clean up the in-memory VRT if we created one
+  if (!vrtPath.empty()) {
+    VSIUnlink(vrtPath.c_str());
   }
 
   return 0;

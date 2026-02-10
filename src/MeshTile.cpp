@@ -230,6 +230,25 @@ MeshTile::MeshTile(const TileCoordinate &coord):
   mChildren(0)
 {}
 
+MeshTile::~MeshTile() {
+  if (mExtendedHeights != nullptr) {
+    CPLFree(mExtendedHeights);
+    mExtendedHeights = nullptr;
+  }
+}
+
+void
+MeshTile::setExtendedHeights(float *heights, int size,
+                             const CRSBounds &extBounds,
+                             const CRSBounds &tileBounds) {
+  mExtendedHeights = heights;
+  mExtendedSize = size;
+  mExtendedBounds = extBounds;
+  mTileBounds = tileBounds;
+  mCellSizeX = extBounds.getWidth() / (size - 1);
+  mCellSizeY = extBounds.getHeight() / (size - 1);
+}
+
 /**
  * @details This writes gzipped terrain data to a file.
  */
@@ -363,35 +382,87 @@ MeshTile::writeFile(CTBOutputStream &ostream, bool writeVertexNormals) const {
     int extensionLength = 2 * vertexCount;
     ostream.write(&extensionLength, sizeof(int));
 
-    std::vector<CRSVertex> normalsPerVertex(vertexCount);
-    std::vector<CRSVertex> normalsPerFace(triangleCount);
-    std::vector<double> areasPerFace(triangleCount);
+    if (mExtendedHeights != nullptr && mExtendedSize > 2) {
+      // Raster-grid normal computation using the extended (ghost) raster.
+      // This produces consistent normals at tile boundaries.
+      const double extMinX = mExtendedBounds.getMinX();
+      const double extMaxY = mExtendedBounds.getMaxY();
+      const int lastIdx = mExtendedSize - 1;
 
-    for (size_t i = 0, icount = mMesh.indices.size(), j = 0; i < icount; i+=3, j++) {
-      const CRSVertex &v0 = cartesianVertices[ mMesh.indices[i  ] ];
-      const CRSVertex &v1 = cartesianVertices[ mMesh.indices[i+1] ];
-      const CRSVertex &v2 = cartesianVertices[ mMesh.indices[i+2] ];
+      for (size_t i = 0; i < (size_t)vertexCount; i++) {
+        const CRSVertex &v = mMesh.vertices[i];
 
-      CRSVertex normal = (v1 - v0).cross(v2 - v0);
-      double area = triangleArea(v0, v1);
-      normalsPerFace[j] = normal;
-      areasPerFace[j] = area;
-    }
-    for (size_t i = 0, icount = mMesh.indices.size(), j = 0; i < icount; i+=3, j++) {
-      int indexV0 = mMesh.indices[i  ];
-      int indexV1 = mMesh.indices[i+1];
-      int indexV2 = mMesh.indices[i+2];
+        // Map vertex CRS position to ghost grid indices
+        int gx = (int)std::round((v.x - extMinX) / mCellSizeX);
+        int gy = (int)std::round((extMaxY - v.y) / mCellSizeY);
 
-      CRSVertex weightedNormal = normalsPerFace[j] * areasPerFace[j];
+        // Clamp to interior range [1, size-2] so cardinal neighbors exist
+        gx = std::max(1, std::min(gx, lastIdx - 1));
+        gy = std::max(1, std::min(gy, lastIdx - 1));
 
-      normalsPerVertex[indexV0] = normalsPerVertex[indexV0] + weightedNormal;
-      normalsPerVertex[indexV1] = normalsPerVertex[indexV1] + weightedNormal;
-      normalsPerVertex[indexV2] = normalsPerVertex[indexV2] + weightedNormal;
-    }
-    for (size_t i = 0; i < vertexCount; i++) {
-      Coordinate<unsigned char> xy = octEncode(normalsPerVertex[i].normalize());
-      ostream.write(&xy.x, sizeof(unsigned char));
-      ostream.write(&xy.y, sizeof(unsigned char));
+        // Get cardinal neighbor heights from the 67x67 grid
+        float hN = mExtendedHeights[(gy - 1) * mExtendedSize + gx];
+        float hS = mExtendedHeights[(gy + 1) * mExtendedSize + gx];
+        float hE = mExtendedHeights[gy * mExtendedSize + (gx + 1)];
+        float hW = mExtendedHeights[gy * mExtendedSize + (gx - 1)];
+
+        // Build CRS positions for each cardinal neighbor
+        double lonE = extMinX + (gx + 1) * mCellSizeX;
+        double lonW = extMinX + (gx - 1) * mCellSizeX;
+        double lonC = extMinX + gx * mCellSizeX;
+        double latN = extMaxY - (gy - 1) * mCellSizeY;
+        double latS = extMaxY - (gy + 1) * mCellSizeY;
+        double latC = extMaxY - gy * mCellSizeY;
+
+        // Convert to ECEF
+        CRSVertex ecefN = LLH2ECEF(CRSVertex(lonC, latN, (double)hN));
+        CRSVertex ecefS = LLH2ECEF(CRSVertex(lonC, latS, (double)hS));
+        CRSVertex ecefE = LLH2ECEF(CRSVertex(lonE, latC, (double)hE));
+        CRSVertex ecefW = LLH2ECEF(CRSVertex(lonW, latC, (double)hW));
+
+        // Central-difference tangent vectors
+        CRSVertex tangentEW = ecefE - ecefW;
+        CRSVertex tangentNS = ecefN - ecefS;
+
+        // Normal = NS x EW (outward-facing on the globe)
+        CRSVertex normal = tangentNS.cross(tangentEW).normalize();
+
+        Coordinate<unsigned char> xy = octEncode(normal);
+        ostream.write(&xy.x, sizeof(unsigned char));
+        ostream.write(&xy.y, sizeof(unsigned char));
+      }
+    } else {
+      // Fallback: triangle-based area-weighted normals
+      std::vector<CRSVertex> normalsPerVertex(vertexCount);
+      std::vector<CRSVertex> normalsPerFace(triangleCount);
+      std::vector<double> areasPerFace(triangleCount);
+
+      for (size_t i = 0, icount = mMesh.indices.size(), j = 0; i < icount; i+=3, j++) {
+        const CRSVertex &v0 = cartesianVertices[ mMesh.indices[i  ] ];
+        const CRSVertex &v1 = cartesianVertices[ mMesh.indices[i+1] ];
+        const CRSVertex &v2 = cartesianVertices[ mMesh.indices[i+2] ];
+
+        CRSVertex normal = (v1 - v0).cross(v2 - v0);
+        double area = triangleArea(v0, v1);
+        normalsPerFace[j] = normal;
+        areasPerFace[j] = area;
+      }
+      for (size_t i = 0, icount = mMesh.indices.size(), j = 0; i < icount; i+=3, j++) {
+        int indexV0 = mMesh.indices[i  ];
+        int indexV1 = mMesh.indices[i+1];
+        int indexV2 = mMesh.indices[i+2];
+
+        CRSVertex weightedNormal = normalsPerFace[j] * areasPerFace[j];
+
+        normalsPerVertex[indexV0] = normalsPerVertex[indexV0] + weightedNormal;
+        normalsPerVertex[indexV1] = normalsPerVertex[indexV1] + weightedNormal;
+        normalsPerVertex[indexV2] = normalsPerVertex[indexV2] + weightedNormal;
+      }
+      for (size_t i = 0; i < (size_t)vertexCount; i++) {
+        Coordinate<unsigned char> xy = octEncode(normalsPerVertex[i].normalize());
+        ostream.write(&xy.x, sizeof(unsigned char));
+        ostream.write(&xy.y, sizeof(unsigned char));
+      }
     }
   }
 }

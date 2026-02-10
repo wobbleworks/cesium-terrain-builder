@@ -20,12 +20,54 @@
  * @author Alvaro Huarte <ahuarte47@yahoo.es>
  */
 
+#include "cpl_conv.h"
+#include "gdal_priv.h"
+
 #include "CTBException.hpp"
 #include "MeshTiler.hpp"
 #include "HeightFieldChunker.hpp"
 #include "GDALDatasetReader.hpp"
+#include "GDALTile.hpp"
 
 using namespace ctb;
+
+/**
+ * @brief Create a raster tile with vertex-centered sampling for mesh generation.
+ *
+ * Unlike TerrainTiler::createRasterTile (which adds a 1-pixel overlap for the
+ * heightmap format), this places pixel centers exactly at the mesh vertex
+ * positions.  The mesh has tileSize vertices spanning (tileSize-1) intervals
+ * across the tile, so the pixel spacing must be tileWidth/(tileSize-1) rather
+ * than the grid resolution tileWidth/tileSize.
+ */
+GDALTile *
+ctb::MeshTiler::createRasterTile(GDALDataset *dataset, const TileCoordinate &coord) const {
+  if (dataset && dataset->GetRasterCount() < 1) {
+    throw CTBException("At least one band must be present in the GDAL dataset");
+  }
+
+  const i_tile tileSize = mGrid.tileSize();
+  CRSBounds tileBounds = mGrid.tileBounds(coord);
+
+  // Vertex spacing: tileSize vertices span (tileSize-1) intervals
+  double cellSizeX = tileBounds.getWidth()  / (double)(tileSize - 1);
+  double cellSizeY = tileBounds.getHeight() / (double)(tileSize - 1);
+
+  // Shift the origin so that GDAL pixel centers (at col+0.5) land on vertex
+  // positions: pixel 0 center = tileBounds min, pixel N-1 center = tileBounds max.
+  double adfGeoTransform[6];
+  adfGeoTransform[0] = tileBounds.getMinX() - 0.5 * cellSizeX;
+  adfGeoTransform[1] = cellSizeX;
+  adfGeoTransform[2] = 0;
+  adfGeoTransform[3] = tileBounds.getMaxY() + 0.5 * cellSizeY;
+  adfGeoTransform[4] = 0;
+  adfGeoTransform[5] = -cellSizeY;
+
+  GDALTile *tile = GDALTiler::createRasterTile(dataset, adfGeoTransform);
+  static_cast<TileCoordinate &>(*tile) = coord;
+
+  return tile;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -201,6 +243,10 @@ ctb::MeshTiler::createMesh(GDALDataset *dataset, const TileCoordinate &coord) co
   prepareSettingsOfTile(terrainTile, dataset, coord, rasterHeights, mGrid.tileSize(), mGrid.tileSize());
   CPLFree(rasterHeights);
 
+  if (mComputeGhostNormals) {
+    readAndSetExtendedHeights(terrainTile, dataset, coord);
+  }
+
   return terrainTile;
 }
 
@@ -214,12 +260,18 @@ ctb::MeshTiler::createMesh(GDALDataset *dataset, const TileCoordinate &coord, ct
   prepareSettingsOfTile(terrainTile, dataset, coord, rasterHeights, mGrid.tileSize(), mGrid.tileSize());
   CPLFree(rasterHeights);
 
+  if (mComputeGhostNormals) {
+    readAndSetExtendedHeights(terrainTile, dataset, coord);
+  }
+
   return terrainTile;
 }
 
 MeshTiler &
 ctb::MeshTiler::operator=(const MeshTiler &other) {
   TerrainTiler::operator=(other);
+  mMeshQualityFactor = other.mMeshQualityFactor;
+  mComputeGhostNormals = other.mComputeGhostNormals;
 
   return *this;
 }
@@ -233,4 +285,90 @@ double ctb::MeshTiler::getEstimatedLevelZeroGeometricErrorForAHeightmap(
   double error = maximumRadius * 2 * M_PI * heightmapTerrainQuality;
   error /= (double)(tileWidth * numberOfTilesAtLevelZero);
   return error;
+}
+
+void
+ctb::MeshTiler::readAndSetExtendedHeights(MeshTile *tile, GDALDataset *dataset, const TileCoordinate &coord) const {
+  const int tileSize = mGrid.tileSize();
+  const int extendedSize = tileSize + 2; // 67 for a 65-pixel tile
+
+  // Use the same vertex spacing as the mesh
+  CRSBounds tileBounds = mGrid.tileBounds(coord);
+  double cellSizeX = tileBounds.getWidth()  / (double)(tileSize - 1);
+  double cellSizeY = tileBounds.getHeight() / (double)(tileSize - 1);
+
+  // Extend by 1 vertex spacing on all 4 sides
+  double extMinX = tileBounds.getMinX() - cellSizeX;
+  double extMinY = tileBounds.getMinY() - cellSizeY;
+  double extMaxX = tileBounds.getMaxX() + cellSizeX;
+  double extMaxY = tileBounds.getMaxY() + cellSizeY;
+  CRSBounds extBounds(extMinX, extMinY, extMaxX, extMaxY);
+
+  // Vertex-centered geo-transform: pixel centers at vertex positions
+  double adfGeoTransform[6];
+  adfGeoTransform[0] = extMinX - 0.5 * cellSizeX;
+  adfGeoTransform[1] = cellSizeX;
+  adfGeoTransform[2] = 0;
+  adfGeoTransform[3] = extMaxY + 0.5 * cellSizeY;
+  adfGeoTransform[4] = 0;
+  adfGeoTransform[5] = -cellSizeY;
+
+  // Create a VRT for the extended area
+  GDALTile *vrtTile = NULL;
+  try {
+    vrtTile = GDALTiler::createRasterTile(dataset, adfGeoTransform, extendedSize, extendedSize);
+  } catch (...) {
+    // VRT creation failed; fall back to triangle-based normals
+    return;
+  }
+
+  if (vrtTile == NULL || vrtTile->dataset == NULL) {
+    delete vrtTile;
+    return;
+  }
+
+  // Read the extended heights via RasterIO
+  float *extHeights = (float *)CPLMalloc(sizeof(float) * extendedSize * extendedSize);
+  GDALRasterBand *band = ((GDALDataset *)vrtTile->dataset)->GetRasterBand(1);
+
+  if (band == NULL ||
+      band->RasterIO(GF_Read, 0, 0, extendedSize, extendedSize,
+                     extHeights, extendedSize, extendedSize,
+                     GDT_Float32, 0, 0) != CE_None) {
+    CPLFree(extHeights);
+    delete vrtTile;
+    return;
+  }
+
+  // Get NoData value
+  int bGotNoData = FALSE;
+  double noDataValue = band->GetNoDataValue(&bGotNoData);
+  if (!bGotNoData) noDataValue = -32768;
+
+  // Replace NoData values with nearest interior edge value (flat extrapolation)
+  for (int row = 0; row < extendedSize; row++) {
+    for (int col = 0; col < extendedSize; col++) {
+      float &h = extHeights[row * extendedSize + col];
+      if (h == (float)noDataValue) {
+        // Clamp to nearest interior cell
+        int srcRow = std::max(1, std::min(row, extendedSize - 2));
+        int srcCol = std::max(1, std::min(col, extendedSize - 2));
+        float srcH = extHeights[srcRow * extendedSize + srcCol];
+
+        // If the clamped source is also NoData, try the tile center
+        if (srcH == (float)noDataValue) {
+          srcH = extHeights[(extendedSize / 2) * extendedSize + (extendedSize / 2)];
+        }
+        // If still NoData, use 0
+        if (srcH == (float)noDataValue) {
+          srcH = 0.0f;
+        }
+        h = srcH;
+      }
+    }
+  }
+
+  delete vrtTile;
+
+  tile->setExtendedHeights(extHeights, extendedSize, extBounds, tileBounds);
 }

@@ -47,6 +47,16 @@ public:
          (tmsCompatible) ? 2 : 1)
   {}
 
+  /// Initialise the profile with a custom spatial reference system.
+  /// This allows non-Earth bodies (Moon, Mars) to use their own geographic CRS
+  /// instead of EPSG:4326, avoiding cross-body PROJ transformation errors.
+  GlobalGeodetic(const OGRSpatialReference &srs, i_tile tileSize = TILE_SIZE, bool tmsCompatible = true):
+    Grid(tileSize,
+         CRSBounds(-180, -90, 180, 90),
+         srs,
+         (tmsCompatible) ? 2 : 1)
+  {}
+
 protected:
 
   /// The EPSG:4326 spatial reference system

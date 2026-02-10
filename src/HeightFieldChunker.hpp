@@ -132,33 +132,37 @@ public:
   }
 
   /// Returns the Coordinate of the Neighbor of the specified border (Left=0, Top=1, Right=2, Botton=3).
+  /// Wraps horizontally at the antimeridian so left/right neighbors are always valid.
   static ctb::TileCoordinate neighborCoord(const Grid& grid, const ctb::TileCoordinate &coord, int borderIndex, bool& okNeighborCoord) {
     okNeighborCoord = true;
+    ctb::TileBounds extent = grid.getTileExtent(coord.zoom);
+    i_tile maxTileX = extent.getMaxX();
+    i_tile maxTileY = extent.getMaxY();
 
     switch (borderIndex)
     {
-    case 0:
+    case 0: // Left
       if (coord.x <= 0) {
-        okNeighborCoord = false;
-        return TileCoordinate();
+        // Wrap around the antimeridian
+        return ctb::TileCoordinate(coord.zoom, maxTileX, coord.y);
       }
       return ctb::TileCoordinate(coord.zoom, coord.x - 1, coord.y);
 
-    case 1:
-      if (coord.y >= grid.getTileExtent(coord.zoom).getMaxY()) {
+    case 1: // Top
+      if (coord.y >= maxTileY) {
         okNeighborCoord = false;
         return TileCoordinate();
       }
       return ctb::TileCoordinate(coord.zoom, coord.x, coord.y + 1);
 
-    case 2: 
-      if (coord.x >= grid.getTileExtent(coord.zoom).getMaxX()) {
-        okNeighborCoord = false;
-        return TileCoordinate();
+    case 2: // Right
+      if (coord.x >= maxTileX) {
+        // Wrap around the antimeridian
+        return ctb::TileCoordinate(coord.zoom, 0, coord.y);
       }
       return ctb::TileCoordinate(coord.zoom, coord.x + 1, coord.y);
 
-    case 3: 
+    case 3: // Bottom
       if (coord.y <= 0) {
         okNeighborCoord = false;
         return TileCoordinate();

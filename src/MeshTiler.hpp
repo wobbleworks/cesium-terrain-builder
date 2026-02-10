@@ -42,19 +42,23 @@ class CTB_DLL ctb::MeshTiler :
 public:
 
   /// Instantiate a tiler with all required arguments
-  MeshTiler(GDALDataset *poDataset, const Grid &grid, const TilerOptions &options, double meshQualityFactor = 1.0):
+  MeshTiler(GDALDataset *poDataset, const Grid &grid, const TilerOptions &options,
+            double meshQualityFactor = 1.0, bool computeGhostNormals = false):
     TerrainTiler(poDataset, grid, options),
-    mMeshQualityFactor(meshQualityFactor) {}
+    mMeshQualityFactor(meshQualityFactor),
+    mComputeGhostNormals(computeGhostNormals) {}
 
   /// Instantiate a tiler with an empty GDAL dataset
   MeshTiler(double meshQualityFactor = 1.0):
     TerrainTiler(),
-    mMeshQualityFactor(meshQualityFactor) {}
+    mMeshQualityFactor(meshQualityFactor),
+    mComputeGhostNormals(false) {}
 
   /// Instantiate a tiler with a dataset and grid but no options
   MeshTiler(GDALDataset *poDataset, const Grid &grid, double meshQualityFactor = 1.0):
     TerrainTiler(poDataset, grid, TilerOptions()),
-    mMeshQualityFactor(meshQualityFactor) {}
+    mMeshQualityFactor(meshQualityFactor),
+    mComputeGhostNormals(false) {}
 
   /// Overload the assignment operator
   MeshTiler &
@@ -73,6 +77,9 @@ protected:
   // Specifies the factor of the quality to convert terrain heightmaps to meshes.
   double mMeshQualityFactor;
 
+  // Whether to compute ghost-border raster normals for edge consistency
+  bool mComputeGhostNormals;
+
   // Determines an appropriate geometric error estimate when the geometry comes from a heightmap.
   static double getEstimatedLevelZeroGeometricErrorForAHeightmap(
     double maximumRadius, 
@@ -80,8 +87,16 @@ protected:
     int tileWidth, 
     int numberOfTilesAtLevelZero);
 
+  /// Override to use vertex-centered sampling (no heightmap overlap)
+  virtual GDALTile *
+  createRasterTile(GDALDataset *dataset, const TileCoordinate &coord) const override;
+
   /// Assigns settings of Tile just to use.
   void prepareSettingsOfTile(MeshTile *tile, GDALDataset *dataset, const TileCoordinate &coord, float *rasterHeights, ctb::i_tile tileSizeX, ctb::i_tile tileSizeY) const;
+
+private:
+  /// Read an extended (67x67) raster and set it on the tile for ghost normals
+  void readAndSetExtendedHeights(MeshTile *tile, GDALDataset *dataset, const TileCoordinate &coord) const;
 };
 
 #endif /* MESHTILER_HPP */

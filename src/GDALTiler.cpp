@@ -300,6 +300,12 @@ getOverviewDataset(GDALDatasetH hSrcDS, GDALTransformerFunc pfnTransformer, void
  */
 GDALTile *
 GDALTiler::createRasterTile(GDALDataset *dataset, double (&adfGeoTransform)[6]) const {
+  return createRasterTile(dataset, adfGeoTransform, mGrid.tileSize(), mGrid.tileSize());
+}
+
+GDALTile *
+GDALTiler::createRasterTile(GDALDataset *dataset, double (&adfGeoTransform)[6],
+                            int outputWidth, int outputHeight) const {
   if (dataset == NULL) {
     throw CTBException("No GDAL dataset is set");
   }
@@ -410,7 +416,7 @@ GDALTiler::createRasterTile(GDALDataset *dataset, double (&adfGeoTransform)[6]) 
   }
 
   // The raster tile is represented as a VRT dataset
-  hDstDS = GDALCreateWarpedVRT(hWrkSrcDS, mGrid.tileSize(), mGrid.tileSize(), adfGeoTransform, psWarpOptions);
+  hDstDS = GDALCreateWarpedVRT(hWrkSrcDS, outputWidth, outputHeight, adfGeoTransform, psWarpOptions);
 
   bool isApproxTransform = (psWarpOptions->pfnTransformer == GDALApproxTransform);
   GDALDestroyWarpOptions( psWarpOptions );

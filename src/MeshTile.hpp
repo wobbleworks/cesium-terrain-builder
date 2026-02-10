@@ -27,6 +27,7 @@
 #include "Mesh.hpp"
 #include "TileCoordinate.hpp"
 #include "Tile.hpp"
+#include "Bounds.hpp"
 #include "CTBOutputStream.hpp"
 
 namespace ctb {
@@ -63,6 +64,9 @@ public:
 
   /// Create a mesh tile from a tile coordinate
   MeshTile(const TileCoordinate &coord);
+
+  /// The destructor
+  ~MeshTile();
 
   /// Write terrain data to the filesystem
   void
@@ -118,10 +122,23 @@ public:
   /// Get the mesh data
   ctb::Mesh & getMesh();
 
+  /// Set extended (ghost) raster heights for improved edge normals
+  void setExtendedHeights(float *heights, int size,
+                          const CRSBounds &extBounds,
+                          const CRSBounds &tileBounds);
+
 protected:
 
   /// The terrain mesh data
   ctb::Mesh mMesh;
+
+  /// Extended (ghost) raster for improved edge normals
+  float *mExtendedHeights = nullptr;
+  int mExtendedSize = 0;
+  CRSBounds mExtendedBounds;
+  CRSBounds mTileBounds;
+  double mCellSizeX = 0;
+  double mCellSizeY = 0;
 
 private:
 
