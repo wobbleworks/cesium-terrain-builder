@@ -127,6 +127,13 @@ GDALTiler::GDALTiler(GDALDataset *poDataset, const Grid &grid, const TilerOption
       mResolution = std::abs(adfGeoTransform[1]); // use the existing dataset resolution
     }
 
+    // Clamp dataset bounds to the grid extent.  A wrapped antimeridian VRT
+    // may extend past ±180°; without clamping the unsigned tile coordinates
+    // would underflow and the iterator would skip all tiles.
+    const CRSBounds &gridExtent = mGrid.getExtent();
+    mBounds.setMinX(std::max(mBounds.getMinX(), gridExtent.getMinX()));
+    mBounds.setMaxX(std::min(mBounds.getMaxX(), gridExtent.getMaxX()));
+
     poDataset->Reference();     // increase the refcount of the dataset
   }
 }

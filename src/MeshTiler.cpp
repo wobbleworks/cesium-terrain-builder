@@ -345,7 +345,63 @@ ctb::MeshTiler::readAndSetExtendedHeights(MeshTile *tile, GDALDataset *dataset, 
   double noDataValue = band->GetNoDataValue(&bGotNoData);
   if (!bGotNoData) noDataValue = -32768;
 
-  // Replace NoData values with nearest interior edge value (flat extrapolation)
+  delete vrtTile;
+
+  // --- Antimeridian wrapping for ghost columns ---
+  // At the antimeridian (±180°), the ghost column extends beyond the raster
+  // and reads NoData. Fix by reading the wrapped column from the opposite edge.
+  {
+    ctb::TileBounds extent = mGrid.getTileExtent(coord.zoom);
+    i_tile maxTileX = extent.getMaxX();
+
+    if (coord.x == 0 || coord.x == maxTileX) {
+      for (int side = 0; side < 2; side++) {
+        bool doWrap = (side == 0) ? (coord.x == 0) : (coord.x == maxTileX);
+        if (!doWrap) continue;
+
+        // side 0 = west ghost col (col 0), side 1 = east ghost col (col N-1)
+        int targetCol = (side == 0) ? 0 : (extendedSize - 1);
+        double ghostLon = (side == 0) ? extMinX : extMaxX;
+        double wrapLon = ghostLon + ((side == 0) ? 360.0 : -360.0);
+
+        double wrapGT[6];
+        wrapGT[0] = wrapLon - 0.5 * cellSizeX;
+        wrapGT[1] = cellSizeX;
+        wrapGT[2] = 0;
+        wrapGT[3] = extMaxY + 0.5 * cellSizeY;
+        wrapGT[4] = 0;
+        wrapGT[5] = -cellSizeY;
+
+        GDALTile *wrapTile = NULL;
+        try {
+          wrapTile = GDALTiler::createRasterTile(dataset, wrapGT, 1, extendedSize);
+        } catch (...) {
+          continue;
+        }
+        if (!wrapTile || !wrapTile->dataset) {
+          delete wrapTile;
+          continue;
+        }
+
+        float *wrapCol = (float *)CPLMalloc(sizeof(float) * extendedSize);
+        GDALRasterBand *wb = ((GDALDataset *)wrapTile->dataset)->GetRasterBand(1);
+        if (wb && wb->RasterIO(GF_Read, 0, 0, 1, extendedSize,
+                               wrapCol, 1, extendedSize,
+                               GDT_Float32, 0, 0) == CE_None) {
+          for (int row = 0; row < extendedSize; row++) {
+            if (wrapCol[row] != (float)noDataValue) {
+              extHeights[row * extendedSize + targetCol] = wrapCol[row];
+            }
+          }
+        }
+        CPLFree(wrapCol);
+        delete wrapTile;
+      }
+    }
+  }
+
+  // Replace remaining NoData values with nearest interior edge value (flat extrapolation).
+  // After antimeridian wrapping, only polar ghost rows should still have NoData.
   for (int row = 0; row < extendedSize; row++) {
     for (int col = 0; col < extendedSize; col++) {
       float &h = extHeights[row * extendedSize + col];
@@ -367,8 +423,6 @@ ctb::MeshTiler::readAndSetExtendedHeights(MeshTile *tile, GDALDataset *dataset, 
       }
     }
   }
-
-  delete vrtTile;
 
   tile->setExtendedHeights(extHeights, extendedSize, extBounds, tileBounds);
 }

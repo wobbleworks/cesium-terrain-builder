@@ -943,6 +943,107 @@ main(int argc, char *argv[]) {
     GDALClose(poInspectDS);
   }
 
+  // If the dataset spans a full 360° of longitude, create a wrapped VRT that
+  // duplicates a few columns from each edge onto the opposite side.  This lets
+  // the GDAL warper interpolate seamlessly across the antimeridian instead of
+  // hitting the raster boundary, eliminating the height/normal crease at ±180°.
+  std::string wrapVrtPath;
+  {
+    GDALDataset *poDS = (GDALDataset *) GDALOpen(effectiveInput.c_str(), GA_ReadOnly);
+    if (poDS) {
+      double gt[6];
+      if (poDS->GetGeoTransform(gt) == CE_None) {
+        int srcW = poDS->GetRasterXSize();
+        int srcH = poDS->GetRasterYSize();
+        double cellX = gt[1];
+        double minX = gt[0];
+        double maxX = gt[0] + cellX * srcW;
+
+        // Check if this spans approximately 360° (within 2 cells tolerance)
+        if (std::abs((maxX - minX) - 360.0) < std::abs(cellX) * 2) {
+          const int padding = 16;
+          int wrappedW = srcW + 2 * padding;
+          const char *srsWKT = poDS->GetProjectionRef();
+          const char *dataTypeName = GDALGetDataTypeName(
+            poDS->GetRasterBand(1)->GetRasterDataType());
+
+          int bGotNoData = FALSE;
+          double noDataValue = poDS->GetRasterBand(1)->GetNoDataValue(&bGotNoData);
+
+          ostringstream vrt;
+          vrt.precision(15);
+          vrt << "<VRTDataset rasterXSize=\"" << wrappedW
+              << "\" rasterYSize=\"" << srcH << "\">\n";
+          vrt << "  <SRS>" << (srsWKT ? srsWKT : "") << "</SRS>\n";
+          vrt << "  <GeoTransform>"
+              << (minX - padding * cellX) << ", " << cellX << ", 0, "
+              << gt[3] << ", 0, " << gt[5] << "</GeoTransform>\n";
+          vrt << "  <VRTRasterBand dataType=\"" << dataTypeName << "\" band=\"1\">\n";
+          if (bGotNoData)
+            vrt << "    <NoDataValue>" << noDataValue << "</NoDataValue>\n";
+
+          // Left padding: rightmost columns of source (wraps from +180° side)
+          vrt << "    <SimpleSource>\n"
+              << "      <SourceFilename relativeToVRT=\"0\">"
+              << effectiveInput << "</SourceFilename>\n"
+              << "      <SourceBand>1</SourceBand>\n"
+              << "      <SrcRect xOff=\"" << (srcW - padding)
+              << "\" yOff=\"0\" xSize=\"" << padding
+              << "\" ySize=\"" << srcH << "\"/>\n"
+              << "      <DstRect xOff=\"0\" yOff=\"0\" xSize=\"" << padding
+              << "\" ySize=\"" << srcH << "\"/>\n"
+              << "    </SimpleSource>\n";
+
+          // Main source
+          vrt << "    <SimpleSource>\n"
+              << "      <SourceFilename relativeToVRT=\"0\">"
+              << effectiveInput << "</SourceFilename>\n"
+              << "      <SourceBand>1</SourceBand>\n"
+              << "      <SrcRect xOff=\"0\" yOff=\"0\" xSize=\"" << srcW
+              << "\" ySize=\"" << srcH << "\"/>\n"
+              << "      <DstRect xOff=\"" << padding << "\" yOff=\"0\" xSize=\""
+              << srcW << "\" ySize=\"" << srcH << "\"/>\n"
+              << "    </SimpleSource>\n";
+
+          // Right padding: leftmost columns of source (wraps from -180° side)
+          vrt << "    <SimpleSource>\n"
+              << "      <SourceFilename relativeToVRT=\"0\">"
+              << effectiveInput << "</SourceFilename>\n"
+              << "      <SourceBand>1</SourceBand>\n"
+              << "      <SrcRect xOff=\"0\" yOff=\"0\" xSize=\"" << padding
+              << "\" ySize=\"" << srcH << "\"/>\n"
+              << "      <DstRect xOff=\"" << (padding + srcW)
+              << "\" yOff=\"0\" xSize=\"" << padding
+              << "\" ySize=\"" << srcH << "\"/>\n"
+              << "    </SimpleSource>\n";
+
+          vrt << "  </VRTRasterBand>\n</VRTDataset>\n";
+
+          wrapVrtPath = "/vsimem/ctb_wrapped_input.vrt";
+          string vrtContent = vrt.str();
+          VSIFCloseL(VSIFileFromMemBuffer(
+            wrapVrtPath.c_str(),
+            (GByte *)CPLStrdup(vrtContent.c_str()),
+            vrtContent.size(), TRUE));
+
+          GDALDatasetH hTest = GDALOpen(wrapVrtPath.c_str(), GA_ReadOnly);
+          if (hTest) {
+            GDALClose(hTest);
+            effectiveInput = wrapVrtPath;
+            if (command.verbosity > 0) {
+              cout << "Created antimeridian-wrapped source ("
+                   << padding << " pixel overlap)" << endl;
+            }
+          } else {
+            VSIUnlink(wrapVrtPath.c_str());
+            wrapVrtPath.clear();
+          }
+        }
+      }
+      GDALClose(poDS);
+    }
+  }
+
   // Define the grid we are going to use
   Grid grid;
   if (strcmp(command.profile, "geodetic") == 0) {
@@ -1044,7 +1145,10 @@ main(int argc, char *argv[]) {
     delete metadata;
   }
 
-  // Clean up the in-memory VRT if we created one
+  // Clean up the in-memory VRTs if we created them
+  if (!wrapVrtPath.empty()) {
+    VSIUnlink(wrapVrtPath.c_str());
+  }
   if (!vrtPath.empty()) {
     VSIUnlink(vrtPath.c_str());
   }
