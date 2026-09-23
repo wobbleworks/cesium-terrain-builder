@@ -4,11 +4,7 @@
 set(HAVE_UNIFIED_GDAL TRUE)
 
 # We need zlib
-find_package(ZLIB)
-if(NOT ZLIB_FOUND)
-  message(FATAL_ERROR "The zlib library cannot be found on the system")
-endif()
-include_directories(${ZLIB_INCLUDE_DIRS})
+find_package(ZLIB REQUIRED)
 
 add_library(ctb SHARED
   GDALTile.cpp
@@ -23,7 +19,8 @@ add_library(ctb SHARED
   MeshTile.cpp
   GlobalMercator.cpp
   GlobalGeodetic.cpp)
-target_link_libraries(ctb ${GDAL_LIBRARIES} ${ZLIB_LIBRARIES})
+target_link_libraries(ctb PUBLIC GDAL::GDAL PRIVATE ZLIB::ZLIB)
+target_compile_definitions(ctb PRIVATE CTB_EXPORTS)
 
 # Install libctb
 set(HEADERS
@@ -63,4 +60,4 @@ set(HEADERS
 install(FILES ${HEADERS} DESTINATION include/ctb)
 install(FILES ctb.hpp DESTINATION include)
 
-install(TARGETS ctb DESTINATION lib)
+install(TARGETS ctb RUNTIME DESTINATION bin LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)

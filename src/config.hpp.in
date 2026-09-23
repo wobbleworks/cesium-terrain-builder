@@ -25,11 +25,11 @@
  * `config.hpp`.
  */
 
-/* Enable symbol export in Visual Studio 2013 as per issue #6.  This is an
-   adaptation of `CPL_DLL` in GDAL's `cpl_port.h`. */
+/* Export symbols from the ctb DLL when building it (CTB_EXPORTS is defined by
+   the build system) and import them when consuming it. */
 #ifndef CTB_DLL
 #if defined(_MSC_VER)
-#  if !defined(CPL_DISABLE_DLL)
+#  if defined(CTB_EXPORTS)
 #    define CTB_DLL     __declspec(dllexport)
 #  else
 #    define CTB_DLL     __declspec(dllimport)

@@ -1,37 +1,24 @@
-cmake_minimum_required(VERSION 2.6)
-project("Cesium Terrain Builder")
+cmake_minimum_required(VERSION 3.16)
+project("Cesium Terrain Builder" C CXX)
 
 # The version number
 set(CTB_VERSION_MAJOR 0)
 set(CTB_VERSION_MINOR 4)
 set(CTB_VERSION_PATCH 1)
 
-# Ensure we have a C++11 compatible compiler (see
-# http://www.guyrutenberg.com/2014/01/05/enabling-c11-c0x-in-cmake/)
-include(CheckCXXCompilerFlag)
-CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
-CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
+# GDAL >= 3.9 requires C++17 for its C++ API
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(NOT MSVC)
-  if(COMPILER_SUPPORTS_CXX11)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-  elseif(COMPILER_SUPPORTS_CXX0X)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
-  else()
-    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
-  endif()
+if(MSVC)
+  # M_PI and friends, no min/max macros from windows.h, no CRT deprecation noise
+  add_compile_definitions(_USE_MATH_DEFINES NOMINMAX _CRT_SECURE_NO_WARNINGS)
+  # C4251: STL members in exported classes
+  add_compile_options(/utf-8 /wd4251)
+  # Keep the DLL next to the executables so the tools run from the build tree
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 endif()
-
-# We need g++ >= version 4.7 (see
-# http://stackoverflow.com/questions/4058565/check-gcc-minor-in-cmake)
-if (CMAKE_COMPILER_IS_GNUCXX)
-  execute_process(COMMAND ${CMAKE_CXX_COMPILER} -dumpversion
-    OUTPUT_VARIABLE GCXX_VERSION)
-  if (GCXX_VERSION VERSION_LESS 4.7)
-    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} is version ${GCXX_VERSION} which is not supported. Please use version 4.7 or greater.")
-  endif()
-endif()
-
 # The tile size (width and height). According to the spec this should always be
 # 65
 set(TERRAIN_TILE_SIZE 65)
@@ -62,11 +49,8 @@ endif()
 FIND_PACKAGE (Threads)
 
 # We need GDAL
-find_package(GDAL)
-if(NOT GDAL_FOUND)
-  message(FATAL_ERROR "The GDAL library cannot be found on the system")
-endif()
-include_directories(${GDAL_INCLUDE_DIRS})
+find_package(GDAL REQUIRED)
+message(STATUS "Using GDAL ${GDAL_VERSION}")
 
 # Build and install libctb
 include_directories("${PROJECT_SOURCE_DIR}/src")

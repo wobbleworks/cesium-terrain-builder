@@ -19,7 +19,9 @@
  * @brief This defines the `GlobalMercator` class
  */
 
+#ifndef _USE_MATH_DEFINES
 #define _USE_MATH_DEFINES       // for M_PI
+#endif
 
 #include "GlobalMercator.hpp"
 

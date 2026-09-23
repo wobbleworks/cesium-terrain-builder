@@ -1,0 +1,20 @@
+{
+  "name": "cesium-terrain-builder",
+  "version-string": "0.4.1",
+  "builtin-baseline": "8320904c3fbee4d9f5c145234d8eed3ab5a3a0e5",
+  "dependencies": [
+    "zlib",
+    {
+      "name": "gdal",
+      "default-features": false,
+      "features": [
+        "jpeg",
+        "lerc",
+        "lzma",
+        "png",
+        "webp",
+        "zstd"
+      ]
+    }
+  ]
+}
